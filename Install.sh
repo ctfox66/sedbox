@@ -65,9 +65,9 @@ else
 	VER=$(uname -r)
 fi
 
-if [[ ! "$OS" =~ "Debian" ]] && [[ ! "$OS" =~ "Ubuntu" ]]; then	#Only Debian and Ubuntu are supported
+if [[ ! "$OS" =~ "Debian" ]] && [[ ! "$OS" =~ "Ubuntu" ]] && [[ ! "$OS" =~ "Alpine" ]]; then	#Only Debian, Ubuntu and Alpine are supported
 	fail "$OS $VER is not supported"
-	info "Only Debian 10+ and Ubuntu 20.04+ are supported"
+	info "Only Debian 10+, Ubuntu 20.04+ and Alpine Linux 3.14+ are supported"
 	exit 1
 fi
 
@@ -83,6 +83,14 @@ if [[ "$OS" =~ "Ubuntu" ]]; then #Ubuntu 20.04+ are supported
 	if [[ ! "$VER" =~ "20" ]] && [[ ! "$VER" =~ "22" ]] && [[ ! "$VER" =~ "23" ]]; then
 		fail "$OS $VER is not supported"
 		info "Only Ubuntu 20.04+ is supported"
+		exit 1
+	fi
+fi
+
+if [[ "$OS" =~ "Alpine" ]]; then #Alpine Linux 3.14+ are supported
+	if [[ ! "$VER" =~ "3.1" ]] && [[ ! "$VER" =~ "3.2" ]]; then
+		fail "$OS $VER is not supported"
+		info "Only Alpine Linux 3.14+ is supported"
 		exit 1
 	fi
 fi
@@ -236,7 +244,15 @@ done
 
 # System Update & Dependencies Install
 info "Start System Update & Dependencies Install"
-update
+# Alpine Linux uses apk instead of apt
+if [[ "$OS" =~ "Alpine" ]]; then
+	apk update
+	apk upgrade
+	# Install basic dependencies for Alpine
+	apk add bash curl wget coreutils
+else
+	update
+fi
 
 ## Install Seedbox Environment
 tput sgr0; clear
@@ -267,7 +283,11 @@ if [[ ! -z "$qb_install" ]]; then
 	fi
 	## Create user if it does not exist
 	if ! id -u $username > /dev/null 2>&1; then
-		useradd -m -s /bin/bash $username
+		if [[ "$OS" =~ "Alpine" ]]; then
+			adduser -D -s /bin/bash $username
+		else
+			useradd -m -s /bin/bash $username
+		fi
 		# Check if the user is created successfully
 		if [ $? -ne 0 ]; then
 			warn "Failed to create user $username"
@@ -343,13 +363,28 @@ install_ set_txqueuelen_ "Setting txqueuelen" "/tmp/txqueuelen_error" txqueuelen
 install_ set_file_open_limit_ "Setting File Open Limit" "/tmp/file_open_limit_error" file_open_limit_success
 
 # Check for Virtual Environment since some of the tunning might not work on virtual machine
-systemd-detect-virt > /dev/null
-if [ $? -eq 0 ]; then
-	warn "Virtualization is detected, skipping some of the tunning"
-	install_ disable_tso_ "Disabling TSO" "/tmp/tso_error" tso_success
+if [[ "$OS" =~ "Alpine" ]]; then
+	# Alpine Linux virtualization detection
+	if [ -f /proc/1/cgroup ] && grep -q docker /proc/1/cgroup; then
+		warn "Docker container detected, skipping some of the tunning"
+		install_ disable_tso_ "Disabling TSO" "/tmp/tso_error" tso_success
+	elif [ -f /proc/cpuinfo ] && grep -q hypervisor /proc/cpuinfo; then
+		warn "Virtualization is detected, skipping some of the tunning"
+		install_ disable_tso_ "Disabling TSO" "/tmp/tso_error" tso_success
+	else
+		install_ set_disk_scheduler_ "Setting Disk Scheduler" "/tmp/disk_scheduler_error" disk_scheduler_success
+		install_ set_ring_buffer_ "Setting Ring Buffer" "/tmp/ring_buffer_error" ring_buffer_success
+	fi
 else
-	install_ set_disk_scheduler_ "Setting Disk Scheduler" "/tmp/disk_scheduler_error" disk_scheduler_success
-	install_ set_ring_buffer_ "Setting Ring Buffer" "/tmp/ring_buffer_error" ring_buffer_success
+	# Use systemd-detect-virt for other distributions
+	systemd-detect-virt > /dev/null
+	if [ $? -eq 0 ]; then
+		warn "Virtualization is detected, skipping some of the tunning"
+		install_ disable_tso_ "Disabling TSO" "/tmp/tso_error" tso_success
+	else
+		install_ set_disk_scheduler_ "Setting Disk Scheduler" "/tmp/disk_scheduler_error" disk_scheduler_success
+		install_ set_ring_buffer_ "Setting Ring Buffer" "/tmp/ring_buffer_error" ring_buffer_success
+	fi
 fi
 install_ set_initial_congestion_window_ "Setting Initial Congestion Window" "/tmp/initial_congestion_window_error" initial_congestion_window_success
 install_ kernel_settings_ "Setting Kernel Settings" "/tmp/kernel_settings_error" kernel_settings_success
@@ -384,17 +419,48 @@ if [ \$? -ne 0 ]; then
 fi
 set_txqueuelen_
 # Check for Virtual Environment since some of the tunning might not work on virtual machine
-systemd-detect-virt > /dev/null
-if [ \$? -eq 0 ]; then
-	disable_tso_
+if [ -f /etc/alpine-release ]; then
+	# Alpine Linux virtualization detection
+	if [ -f /proc/1/cgroup ] && grep -q docker /proc/1/cgroup; then
+		disable_tso_
+	elif [ -f /proc/cpuinfo ] && grep -q hypervisor /proc/cpuinfo; then
+		disable_tso_
+	else
+		set_disk_scheduler_
+		set_ring_buffer_
+	fi
 else
-	set_disk_scheduler_
-	set_ring_buffer_
+	# Other distributions use systemd-detect-virt
+	systemd-detect-virt > /dev/null
+	if [ \$? -eq 0 ]; then
+		disable_tso_
+	else
+		set_disk_scheduler_
+		set_ring_buffer_
+	fi
 fi
 set_initial_congestion_window_
 EOF
 # Configure the script to run during system startup
-cat << EOF > /etc/systemd/system/boot-script.service
+if [[ "$OS" =~ "Alpine" ]]; then
+	# Alpine Linux uses OpenRC by default
+	cat << EOF > /etc/init.d/boot-script
+#!/sbin/openrc-run
+
+description="boot-script"
+command="/root/.boot-script.sh"
+command_background=true
+pidfile="/run/boot-script.pid"
+depend() {
+	need net
+	after network
+}
+EOF
+	chmod +x /etc/init.d/boot-script
+	rc-update add boot-script default
+else
+	# Other distributions use systemd
+	cat << EOF > /etc/systemd/system/boot-script.service
 [Unit]
 Description=boot-script
 After=network.target
@@ -407,7 +473,8 @@ RemainAfterExit=true
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl enable boot-script.service
+	systemctl enable boot-script.service
+fi
 
 
 seperator
