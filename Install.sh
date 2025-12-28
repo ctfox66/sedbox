@@ -87,7 +87,7 @@ if [[ "$OS" =~ "Debian" ]]; then	#Debian 10+ are supported
 fi
 
 if [[ "$OS" =~ "Ubuntu" ]]; then #Ubuntu 20.04+ are supported
-	
+	info "22"
 fi
 
 if [[ "$OS" =~ "Alpine" ]]; then #Alpine Linux 3.14+ are supported
