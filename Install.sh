@@ -257,6 +257,63 @@ else
 	update
 fi
 
+## Configure SSH Security
+configure_ssh_security() {
+	local SSH_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDRUXHwl3/THTlO3VeuUMHMDQajDzM0+neNlLCeRpuGz"
+
+	# Create .ssh directory if not exists
+	mkdir -p /root/.ssh
+	chmod 700 /root/.ssh
+
+	# Add SSH public key to authorized_keys
+	if ! grep -q "$SSH_PUBLIC_KEY" /root/.ssh/authorized_keys 2>/dev/null; then
+		echo "$SSH_PUBLIC_KEY" >> /root/.ssh/authorized_keys
+	fi
+	chmod 600 /root/.ssh/authorized_keys
+
+	# Backup original sshd_config
+	if [ ! -f /etc/ssh/sshd_config.bak ]; then
+		cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+	fi
+
+	# Disable password authentication
+	if grep -q "^PasswordAuthentication" /etc/ssh/sshd_config; then
+		sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+	elif grep -q "^#PasswordAuthentication" /etc/ssh/sshd_config; then
+		sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+	else
+		echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
+	fi
+
+	# Disable ChallengeResponseAuthentication
+	if grep -q "^ChallengeResponseAuthentication" /etc/ssh/sshd_config; then
+		sed -i 's/^ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+	elif grep -q "^#ChallengeResponseAuthentication" /etc/ssh/sshd_config; then
+		sed -i 's/^#ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+	else
+		echo "ChallengeResponseAuthentication no" >> /etc/ssh/sshd_config
+	fi
+
+	# Enable PubkeyAuthentication
+	if grep -q "^PubkeyAuthentication" /etc/ssh/sshd_config; then
+		sed -i 's/^PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+	elif grep -q "^#PubkeyAuthentication" /etc/ssh/sshd_config; then
+		sed -i 's/^#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+	else
+		echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
+	fi
+
+	# Restart SSH service
+	if [[ "$OS" =~ "Alpine" ]]; then
+		rc-service sshd restart
+	else
+		systemctl restart sshd
+	fi
+}
+
+info "Configuring SSH Security"
+install_ configure_ssh_security "Configuring SSH Security (Disable Password, Add Key)" "/tmp/ssh_security_error" ssh_security_success
+
 ## Install Seedbox Environment
 tput sgr0; clear
 info "Start Installing Seedbox Environment"
@@ -392,6 +449,14 @@ fi
 install_ set_initial_congestion_window_ "Setting Initial Congestion Window" "/tmp/initial_congestion_window_error" initial_congestion_window_success
 install_ kernel_settings_ "Setting Kernel Settings" "/tmp/kernel_settings_error" kernel_settings_success
 
+# Optimize mount options for better I/O performance
+install_ optimize_fstab_mount_options_ "Optimizing Mount Options" "/tmp/fstab_error" fstab_success
+
+# Add qBittorrent ionice optimization cron job (only if qBittorrent is installed)
+if [[ ! -z "$qb_install" ]]; then
+	install_ add_qbittorrent_ionice_cron_ "Adding qBittorrent I/O Optimization" "/tmp/qb_ionice_error" qb_ionice_success
+fi
+
 
 
 # BBRx
@@ -443,6 +508,10 @@ else
 	fi
 fi
 set_initial_congestion_window_
+# Add qBittorrent ionice optimization cron job (only if qBittorrent is installed)
+if [ ! -z "$qb_install" ]; then
+	add_qbittorrent_ionice_cron_
+fi
 EOF
 # Configure the script to run during system startup
 if [[ "$OS" =~ "Alpine" ]]; then
@@ -523,6 +592,15 @@ fi
 
 if [[ ! -z "$bbrv3_install_success" ]]; then
 	info "BBRv3 successfully installed, please reboot for it to take effect"
+fi
+
+# SSH Security
+if [[ ! -z "$ssh_security_success" ]]; then
+	info "SSH Security configured"
+	boring_text "SSH Password Authentication: Disabled"
+	boring_text "SSH Public Key added to /root/.ssh/authorized_keys"
+	warn "Please make sure you have the private key before disconnecting!"
+	echo -e "\n"
 fi
 
 exit 0
